@@ -9,7 +9,7 @@ ENV TZ=UTC
 ENV LANG=en_US.utf8
 ENV PGPORT=5432
 ENV PGUSER=postgres
-ENV PGDATA=/var/lib/postgresql/data
+ENV PGDATA=/var/lib/postgresql/${PG_MAJOR}/data
 ENV PGBACK_DATA=/var/lib/pgbackrest
 
 # --- Install Dependencies & Tools ---
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-# postgresql-server-dev-${PG_MAJOR} \
+
 COPY . /
 RUN chmod +x /entrypoint.sh
 

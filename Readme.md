@@ -13,7 +13,7 @@
       - "5432:5432"
     volumes:
         # postgres data
-      - ./pgbackrest/postgresql:/var/lib/postgresql/data
+      - ./pgbackrest/postgresql:/var/lib/postgresql
         # pgbackrest configs and logs
       - ./pgbackrest/etc:/etc/pgbackrest
       - ./pgbackrest/log:/var/log/pgbackrest
