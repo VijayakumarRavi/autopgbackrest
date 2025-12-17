@@ -24,7 +24,6 @@ pg1-port=$PGPORT
 pg1-user=postgres
 pg1-database=postgres
 
-
 [global]
 start-fast=y
 archive-async=y
@@ -46,8 +45,6 @@ fi
 
 create_pg_configs() {
     log_message "📢 Creating postgresql configuration file..."
-    mkdir -p $PGDATA
-    chown $PGUSER:$PGUSER $PGDATA
     cat <<EOF > $PGDATA/postgresql.conf
 listen_addresses = '*'
 port = $PGPORT
@@ -72,8 +69,6 @@ ssl=on
 ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
 ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
 
-shared_preload_libraries = vchord
-
 logging_collector = on
 log_directory = '/var/log/pgbackrest/postgres'
 log_filename = 'postgresql-%Y-%m-%d.log'
@@ -96,7 +91,7 @@ hostssl all             all             all                     scram-sha-256
 EOF
 }
 
-if [ ! -f /etc/pgbackrest/pgbackrest.conf ]; then
+if [ ! -f /cronjob ]; then
     log_message "📢 Creating supercronic cron job configuration file..."
     cat <<EOF > /cronjob
 # Pgbackrest repo1
@@ -120,6 +115,8 @@ log_message "📢 Starting PostgreSQL with pgbackrest archiving enabled..."
 shift
 
 log_message "📢 Setting permissions for pgbackrest directories..."
+mkdir -p $PGDATA
+mkdir -p $PGBACK_DATA
 chown -R $PGUSER:$PGUSER $PGDATA
 chown -R $PGUSER:$PGUSER $PGBACK_DATA
 chown -R $PGUSER:$PGUSER /var/log/pgbackrest

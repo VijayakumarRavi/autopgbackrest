@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-ARG POSTGRES_TAG=18
-FROM postgres:${POSTGRES_TAG}
+ARG POSTGRES_TAG=18-trixie
+FROM postgres:${POSTGRES_TAG}-trixie
 
 ARG SUPERCRONIC_VERSION
 
