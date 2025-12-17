@@ -37,18 +37,18 @@ repo1-bundle=y
 repo1-block=y
 repo1-path=$PGBACK_DATA
 repo1-cipher-type=aes-256-cbc
-repo1-cipher-pass=some-secret-passphrase
+repo1-cipher-pass=$PGBACK_PASSWORD
 repo1-retention-archive=2
 repo1-retention-full=7
 repo1-retention-full-type=time
 EOF
 fi
 
-log_message "📢 Creating postgresql configuration file..."
-mkdir -p $PGDATA
-chown $PGUSER:$PGUSER $PGDATA
-
-cat <<EOF > $PGDATA/postgresql.conf
+create_pg_configs() {
+    log_message "📢 Creating postgresql configuration file..."
+    mkdir -p $PGDATA
+    chown $PGUSER:$PGUSER $PGDATA
+    cat <<EOF > $PGDATA/postgresql.conf
 listen_addresses = '*'
 port = $PGPORT
 max_connections = 100
@@ -82,8 +82,8 @@ log_rotation_age = 1d
 log_truncate_on_rotation = on
 EOF
 
-log_message "📢 Creating pg_hba configuration file..."
-cat <<EOF > $PGDATA/pg_hba.conf
+    log_message "📢 Creating pg_hba configuration file..."
+    cat <<EOF > $PGDATA/pg_hba.conf
 # TYPE  DATABASE        USER            ADDRESS                 METHOD
 # "local" is for Unix domain socket connections only
 local   all             all                                     trust
@@ -94,6 +94,7 @@ host    all             all             ::1/128                 trust
 # Everything else
 hostssl all             all             all                     scram-sha-256
 EOF
+}
 
 if [ ! -f /etc/pgbackrest/pgbackrest.conf ]; then
     log_message "📢 Creating supercronic cron job configuration file..."
@@ -207,10 +208,12 @@ if [[ ! -f $PGDATA/PG_VERSION ]]; then
     log_message "📢 PostgreSQL not initialized. Checking for backups to restore..."
     EXISTING_BACKUPS=$(check_existing_backups)
     if [ "$EXISTING_BACKUPS" -gt 0 ]; then
+        create_pg_configs
         restore_latest_backup
     else
         log_message "📢 No existing backups found, running initdb..."
         docker-ensure-initdb.sh
+        create_pg_configs
         initialize_stanza
     fi
 else

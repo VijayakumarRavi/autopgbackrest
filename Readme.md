@@ -8,6 +8,7 @@
       POSTGRES_USER: postgres
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD: postgres
+      PGBACK_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
