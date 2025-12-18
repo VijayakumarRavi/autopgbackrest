@@ -8,6 +8,15 @@ log_message() {
 
 log_message "📢 Starting PostgreSQL with pgbackrest backup support..."
 
+_shutdown() {
+    log_message "🛑 Received termination signal. Shutting down..."
+    # Send SIGTERM to the background postgres process
+    kill -TERM "$child_pid" 2>/dev/null
+    wait "$child_pid"
+}
+
+trap _shutdown SIGTERM SIGINT
+
 if [ "$1" != "postgres" ]; then
     log_message "⚠️ Not starting PostgreSQL server, passing through to original entrypoint..."
     exec docker-entrypoint.sh "$@"
@@ -30,6 +39,9 @@ archive-async=y
 archive-push-queue-max=5GiB
 compress-type=bz2
 compress-level=9
+process-max=2
+log-level-console=info
+log-level-file=detail
 
 # Local repository configuration
 repo1-bundle=y
@@ -38,8 +50,8 @@ repo1-path=$PGBACK_DATA
 repo1-cipher-type=aes-256-cbc
 repo1-cipher-pass=$PGBACK_PASSWORD
 repo1-retention-archive=2
-repo1-retention-full=7
-repo1-retention-full-type=time
+repo1-retention-full=2
+repo1-retention-full-type=count
 EOF
 fi
 
