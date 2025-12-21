@@ -1,20 +1,45 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
-# Function to log messages
+PG_CONF="/etc/pgbackrest/pgbackrest.conf"
+
 log_message() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [PGBACKREST-ENTRYPOINT] $1" >&2
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [BOOTSTRAP] $1" >&2
 }
 
-log_message "📢 Starting PostgreSQL with pgbackrest backup support..."
+generate_ssl_cert() {
+    local cert_dir="/var/lib/postgresql/certs"
+    local key_file="$cert_dir/server.key"
+    local cert_file="$cert_dir/server.crt"
+
+    if [ ! -d "$cert_dir" ]; then
+        mkdir -p "$cert_dir"
+        chown "$PGUSER:$PGUSER" "$cert_dir"
+        chmod 700 "$cert_dir"
+    fi
+
+    if [ ! -f "$key_file" ] || [ ! -f "$cert_file" ]; then
+        log_message "🔐 Generating new self-signed SSL certificate..."
+        openssl req -new -x509 -days 3650 -nodes -text -out "$cert_file" \
+            -keyout "$key_file" -subj "/CN=postgres-server" 2>/dev/null
+
+        chmod 600 "$key_file"
+        chmod 600 "$cert_file"
+        chown "$PGUSER:$PGUSER" "$key_file"
+        chown "$PGUSER:$PGUSER" "$cert_file"
+        log_message "✅ SSL Certificate generated."
+    else
+        log_message "🔐 SSL Certificate found. Skipping generation."
+    fi
+}
+
+generate_ssl_cert
 
 _shutdown() {
-    log_message "🛑 Received termination signal. Shutting down..."
-    # Send SIGTERM to the background postgres process
+    log_message "🛑 Received termination signal. Forwarding to Postgres..."
     kill -TERM "$child_pid" 2>/dev/null
     wait "$child_pid"
 }
-
 trap _shutdown SIGTERM SIGINT
 
 if [ "$1" != "postgres" ]; then
@@ -22,11 +47,19 @@ if [ "$1" != "postgres" ]; then
     exec docker-entrypoint.sh "$@"
 fi
 
-if [ ! -f /etc/pgbackrest/pgbackrest.conf ]; then
-    log_message "📢 Creating pgbackrest configuration file..."
-    mkdir -p $PGBACK_DATA
-    chown $PGUSER:$PGUSER $PGBACK_DATA
-    cat <<EOF > /etc/pgbackrest/pgbackrest.conf
+log_message "🚀 Starting Container Initialization..."
+mkdir -p $PGDATA
+mkdir -p "$PGBACK_DATA"
+chown -R $PGUSER:$PGUSER $PGDATA
+chown -R "$PGUSER:$PGUSER" "$PGBACK_DATA"
+chown -R $PGUSER:$PGUSER /var/log/pgbackrest
+chown -R $PGUSER:$PGUSER /etc/pgbackrest
+chown -R $PGUSER:$PGUSER /tmp/pgbackrest
+
+if [ ! -f "$PG_CONF" ]; then
+    log_message "📄 No pgbackrest.conf found. Generating default local config..."
+
+    cat <<EOF > "$PG_CONF"
 [production]
 pg1-path=$PGDATA
 pg1-port=$PGPORT
@@ -43,7 +76,6 @@ process-max=2
 log-level-console=info
 log-level-file=detail
 
-# Local repository configuration
 repo1-bundle=y
 repo1-block=y
 repo1-path=$PGBACK_DATA
@@ -53,33 +85,46 @@ repo1-retention-archive=2
 repo1-retention-full=2
 repo1-retention-full-type=count
 EOF
+    chmod 640 "$PG_CONF"
+    chown root:postgres "$PG_CONF"
 fi
 
-create_pg_configs() {
-    log_message "📢 Creating postgresql configuration file..."
-    cat <<EOF > $PGDATA/postgresql.conf
-listen_addresses = '*'
-port = $PGPORT
-max_connections = 100
-unix_socket_directories = '/var/run/postgresql'
-shared_buffers = 128MB
+if [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+    log_message "🔍 Data directory is empty. Checking for existing backups with provided configuration..."
+    if BACKUP_INFO=$(gosu $PGUSER pgbackrest --stanza=production info --output=json 2>/dev/null); then
+        BACKUP_COUNT=$(echo "$BACKUP_INFO" | jq -r ".[] | select(.name==\"production\") | .backup | length // 0")
+        
+        if [ "$BACKUP_COUNT" -gt 0 ]; then
+            log_message "♻️  Found $BACKUP_COUNT backup(s). Initiating RESTORE..."
+            if gosu $PGUSER pgbackrest --stanza=production restore --log-level-console=info --delta; then
+                log_message "✅ Restore successful."
+            else
+                log_message "❌ Restore failed! Check configuration."
+                exit 1
+            fi
+        else
+            log_message "🆕 Repository accessible but empty. Proceeding to fresh InitDB."
+        fi
+    else
+        log_message "🆕 Repository check failed (likely uninitialized). Proceeding to fresh InitDB."
+    fi
+fi
 
+if [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+    mkdir -p /docker-entrypoint-initdb.d
+    cat <<EOF > /docker-entrypoint-initdb.d/99_pgbackrest_config.sh
+#!/bin/bash
+echo "Append pgbackrest config to postgresql.conf..."
+cat <<CONF >> "\$PGDATA/postgresql.conf"
 archive_mode = on
 archive_command = 'pgbackrest --stanza=production archive-push %p'
 archive_timeout = 300
-
 wal_level = replica
 max_wal_senders = 10
-wal_keep_size = 1GB
-wal_compression = on
-checkpoint_completion_target = 0.7
-checkpoint_timeout = 15min
-max_wal_size = 2GB
-min_wal_size = 1GB
 
 ssl=on
-ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
-ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
+ssl_cert_file = '/var/lib/postgresql/certs/server.crt'
+ssl_key_file = '/var/lib/postgresql/certs/server.key'
 
 logging_collector = on
 log_directory = '/var/log/pgbackrest/postgres'
@@ -87,167 +132,50 @@ log_filename = 'postgresql-%Y-%m-%d.log'
 log_file_mode = 0777
 log_rotation_age = 1d
 log_truncate_on_rotation = on
-EOF
-
-    log_message "📢 Creating pg_hba configuration file..."
-    cat <<EOF > $PGDATA/pg_hba.conf
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-# "local" is for Unix domain socket connections only
+CONF
+cat <<CONF >> "\$PGDATA/pg_hba.conf"
 local   all             all                                     trust
-# IPv4 local connections:
 host    all             all             127.0.0.1/32            trust
-# IPv6 local connections:
 host    all             all             ::1/128                 trust
-# Everything else
 hostssl all             all             all                     scram-sha-256
+CONF
 EOF
-}
+    chmod +x /docker-entrypoint-initdb.d/99_pgbackrest_config.sh
+fi
 
-if [ ! -f /cronjob ]; then
-    log_message "📢 Creating supercronic cron job configuration file..."
-    cat <<EOF > /cronjob
-# Pgbackrest repo1
-# Full backup: Sunday at 01:00
+if [ -z "$CRONFILE" ]; then
+    CRONFILE="/etc/pgbackrest/cronjob"
+fi
+if [ ! -f $CRONFILE ]; then
+    log_message "⏰ Generating default cron schedule..."
+    cat <<EOF > $CRONFILE
 0 1 * * 0 pgbackrest --stanza=production backup --repo=1 --type=full
-# Differential backup: Monday-Saturday at 01:00
 0 1 * * 1-6 pgbackrest --stanza=production backup --repo=1 --type=diff
-# Incremental backup: Every hour except 01:00
 0 2-23 * * * pgbackrest --stanza=production backup --repo=1 --type=incr
-
-# Backup status check
-0 1 * * * pgbackrest --stanza=production info --repo=1 >> /var/log/pgbackrest/repo1-backup-status.log 2>&1
 EOF
 fi
-
-log_message "📢 Setting up supercronic for cron job management..."
-chown $PGUSER:$PGUSER /cronjob
-gosu $PGUSER supercronic -debug -inotify /cronjob > /var/log/pgbackrest/supercronic.log 2>&1 &
-
-log_message "📢 Starting PostgreSQL with pgbackrest archiving enabled..."
-shift
-
-log_message "📢 Setting permissions for pgbackrest directories..."
-mkdir -p $PGDATA
-mkdir -p $PGBACK_DATA
-chown -R $PGUSER:$PGUSER $PGDATA
-chown -R $PGUSER:$PGUSER $PGBACK_DATA
-chown -R $PGUSER:$PGUSER /var/log/pgbackrest
-chown -R $PGUSER:$PGUSER /etc/pgbackrest
-chown -R $PGUSER:$PGUSER /tmp/pgbackrest
-
-initialize_stanza() {
-    log_message "📢 Initializing pgbackrest stanza..."
-    gosu $PGUSER pg_ctl start -o "-p $PGPORT -k /var/run/postgresql" -D $PGDATA
-
-    if gosu $PGUSER pgbackrest --stanza=production --log-level-console=info stanza-create; then
-        log_message "✅ Pgbackrest stanza initialized successfully"
-        gosu $PGUSER pg_ctl restart -o "-p $PGPORT -k /var/run/postgresql" -D $PGDATA
-    else
-        log_message "❌ Pgbackrest stanza initialization failed, exiting..."
-        gosu $PGUSER pg_ctl stop -o "-p $PGPORT -k /var/run/postgresql" -D $PGDATA
-        exit 1
-    fi
-
-    log_message "📢 Checking pgbackrest stanza..."
-    if gosu $PGUSER pgbackrest --stanza=production --log-level-console=info check; then
-        log_message "✅ Pgbackrest stanza check passed"
-        gosu $PGUSER pg_ctl stop -o "-p $PGPORT -k /var/run/postgresql" -D $PGDATA
-    else
-        log_message "❌ Pgbackrest stanza check failed, exiting..."
-        gosu $PGUSER pg_ctl stop -o "-p $PGPORT -k /var/run/postgresql" -D $PGDATA
-        exit 1
-    fi
-}
-
-# Function to check for existing backups
-check_existing_backups() {
-    local backup_count
-    backup_count=$(gosu $PGUSER pgbackrest --stanza=production info --output=json | jq '.[] | select(.name=="production") | .backup | length')
-    if [ -n "$backup_count" ] && [ "$backup_count" -ge 0 ]; then
-        log_message "📢 Found $backup_count valid backup(s)"
-        echo "$backup_count"
-        return 0
-    else
-        log_message "❌ Failed to check existing backups"
-        echo 0
-        return 1
-    fi
-}
-
-# Function to restore the latest backup
-restore_latest_backup() {
-    log_message "📢 Restoring latest pgbackrest backup..."
-    if [ -d $PGDATA ] && [ -n "$(ls -A $PGDATA)" ]; then
-        log_message "⚠️ Cleaning existing data directory..."
-        rm -rf $PGDATA/*
-    fi
-    if gosu $PGUSER pgbackrest --stanza=production --log-level-console=info restore; then
-        log_message "✅ Latest backup restored successfully"
-    else
-        log_message "❌ Failed to restore latest backup, exiting..."
-        exit 1
-    fi
-}
-
-# Function to create initial backup
-create_initial_backup() {
-    log_message "📢 Creating initial pgbackrest backup..."
-    if gosu $PGUSER pgbackrest --stanza=production --type=full --log-level-console=info backup; then
-        log_message "✅ Initial backup created successfully"
-        return 0
-    else
-        log_message "❌ Failed to create initial backup"
-        return 1
-    fi
-}
-
-# Function to check if PostgreSQL is ready
-check_postgres_ready() {
-    for i in {1..60}; do
-        if pg_isready -U "${POSTGRES_USER:-postgres}" -h /var/run/postgresql >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
-# Initialize database if PG_VERSION doesn't exist
-if [[ ! -f $PGDATA/PG_VERSION ]]; then
-    log_message "📢 PostgreSQL not initialized. Checking for backups to restore..."
-    EXISTING_BACKUPS=$(check_existing_backups)
-    if [ "$EXISTING_BACKUPS" -gt 0 ]; then
-        create_pg_configs
-        restore_latest_backup
-    else
-        log_message "📢 No existing backups found, running initdb..."
-        docker-ensure-initdb.sh
-        create_pg_configs
-        initialize_stanza
-    fi
-else
-    log_message "✅ PostgreSQL already initialized."
-    initialize_stanza
-fi
-
-# Start PostgreSQL
-docker-entrypoint.sh postgres "$@" &
-POSTGRES_PID=$!
+chown "$PGUSER:$PGUSER" $CRONFILE
+log_message "⏰ Starting Supercronic daemon..."
+gosu $PGUSER supercronic -debug -inotify $CRONFILE > /var/log/pgbackrest/supercronic.log 2>&1 &
 
 (
-    log_message "📢 Waiting for PostgreSQL to be ready..."
-    if check_postgres_ready; then
-        log_message "✅ PostgreSQL is ready!"
-        # Only create a new backup if no data was restored
-        EXISTING_BACKUPS=$(check_existing_backups)
-        if [ "$EXISTING_BACKUPS" -eq 0 ]; then
-            log_message "📢 No existing backups found or new database initialized, creating initial backup..."
-            create_initial_backup
+    log_message "⏳ (Background) Waiting for PostgreSQL to be ready..."
+    until pg_isready -U postgres -h 127.0.0.1 -q; do sleep 2; done
+    log_message "✅ (Background) PostgreSQL is UP."
+    if ! gosu $PGUSER pgbackrest --stanza=production check >/dev/null 2>&1; then
+        log_message "⚙️ (Background) Stanza not found. Creating..."
+        if gosu $PGUSER pgbackrest --stanza=production --log-level-console=info stanza-create; then
+            log_message "✅ Stanza created. Triggering initial backup..."
+            gosu $PGUSER pgbackrest --stanza=production --type=full --log-level-console=info backup || true
+        else
+            log_message "⚠️ Stanza creation failed (or was done by another node)."
         fi
     else
-        log_message "❌ PostgreSQL failed to become ready within 2 minutes"
-        log_message "❌ Container will continue running, but backup operations were skipped"
+        log_message "✅ Stanza is healthy."
     fi
 ) &
 
-wait $POSTGRES_PID
+log_message "🐘 Starting PostgreSQL..."
+/usr/local/bin/docker-entrypoint.sh "$@" &
+child_pid=$!
+wait "$child_pid"
