@@ -21,7 +21,7 @@ function "pg_tags" {
     # renovate: datasource=docker depName=postgres
     "16.13",
     # renovate: datasource=docker depName=postgres
-    "15.17",
+    "15.19",
     # renovate: datasource=docker depName=postgres
     "14.22"
   ]
