@@ -8,7 +8,7 @@ variable "SOURCE" {
 
 variable "SUPERCRONIC_VERSION" {
   # renovate: datasource=github-releases depName=aptible/supercronic
-  default = "v0.2.44"
+  default = "v0.2.51"
 }
 
 function "pg_tags" {
